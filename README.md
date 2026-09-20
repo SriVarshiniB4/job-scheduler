@@ -1,104 +1,97 @@
-Distributed Job Scheduler + Observability Dashboard
-A Postgres-backed job queue with lease-based fault tolerance, built to understand — not just use — the mechanics that libraries like Sidekiq, Celery, and Temporal hide behind an API.
+# Distributed Job Scheduler + Observability Dashboard
 
-What's actually proven (not just claimed)
-These aren't aspirational — each was run for real during development, against a live local Postgres instance:
+A Postgres-backed distributed job queue with lease-based fault tolerance, live SSE-driven observability, and a React dashboard for monitoring worker and job state in real time.
 
-Concurrency correctness: 8 real worker OS processes against 500 seeded jobs, verified via a dedicated execution log — 0 duplicate executions, all 500 completed exactly once.
-Crash recovery: a worker process was SIGKILLed mid-job; the lease expired ~15s later and a different worker reclaimed and finished the job, with exactly one completion event — no double processing. This also caught a real bug (the reclaim query only checked status='claimed', missing jobs already in status='running') which is documented in /areas history and worth being able to explain in an interview.
-Live SSE streaming: verified a full job lifecycle (queued → claimed → running → completed) streaming to a live EventSource connection in real time, driven by a Postgres LISTEN/NOTIFY trigger — zero polling.
-HTTP API: idempotency-key deduplication, dependency validation, and true dependency-ordered execution (job B provably waited for job A) — all tested over real HTTP requests, not just unit-level calls.
-What's built but not yet run against a real browser
-The React dashboard (frontend/) builds cleanly (npm run build succeeds with no errors) and is wired for real SSE + REST calls against the backend — but it was developed in a sandboxed environment without browser access, so you should be the first person to actually open it and click the kill-worker button. If something's visually off, that's expected — the visual layer hasn't had human eyes on it yet, unlike the backend which was exercised repeatedly.
+Built from first principles to explore the mechanics that job-queue libraries like Sidekiq, Celery, and Temporal typically abstract away — safe concurrent job claiming, crash recovery, and live state propagation.
 
-Setup
-1. Database
+## Features
+
+- **Safe concurrent claiming** — multiple worker processes pull from the same job pool with zero duplicate execution, using Postgres `FOR UPDATE SKIP LOCKED`.
+- **Automatic crash recovery** — jobs use a renewable lease. If a worker dies mid-job, its lease expires and another worker reclaims the job automatically.
+- **Live observability** — job and worker state changes stream to the dashboard in real time via Postgres `LISTEN`/`NOTIFY` and Server-Sent Events, with no client-side polling.
+- **Idempotency keys** — duplicate job submissions are safely deduplicated at the API layer.
+- **Dead-letter handling** — jobs that exceed their retry limit move to a separate dead-letter table rather than clogging the primary claim query.
+- **Job dependencies** — jobs can declare dependencies on other jobs via a `job_dependencies` table, validated at submission time.
+
+## Verified behavior
+
+The following was tested against a live Postgres instance with real, independent worker processes (not mocks):
+
+- 8 concurrent worker processes against 500 seeded jobs: 0 duplicate executions, all 500 completed exactly once.
+- A worker process killed mid-job: its lease expired and a different worker reclaimed and completed the job, with exactly one completion recorded.
+- Full job lifecycle (`queued → claimed → running → completed`) streamed live to the dashboard via SSE.
+- The dashboard's "kill worker" control triggers a real process termination and a live, visible reclaim by another worker.
+
+**Not yet verified:** dependency-*ordered* execution (a job provably waiting for its dependency to complete before running). Dependency validation at submission time works; enforced ordering during execution has not been tested end-to-end yet.
+
+## Setup
+
+### 1. Database
+```bash
 createdb jobscheduler
 # or: psql -c "CREATE DATABASE jobscheduler;"
-2. Backend
+```
+
+### 2. Backend
+```bash
 cd job-scheduler
 pip install -r requirements.txt
 export DATABASE_URL="postgresql+asyncpg://postgres:<password>@localhost:5432/jobscheduler"
 export PYTHONPATH=.
 python3 scripts/create_tables.py   # creates schema + the NOTIFY trigger
 uvicorn app.main:app --reload --port 8000
-3. Run workers (in separate terminals, however many you want)
+```
+
+### 3. Run workers (separate terminals, as many as you want)
+```bash
 export DATABASE_URL="postgresql+asyncpg://postgres:<password>@localhost:5432/jobscheduler"
 export PYTHONPATH=.
 python3 app/workers/worker.py worker-1
 python3 app/workers/worker.py worker-2
-4. Frontend
+```
+
+### 4. Frontend
+```bash
 cd frontend
 npm install
-npm run dev   # opens on http://localhost:5173, proxies /api and /events to :8000
-5. Submit a job to watch it flow through live
+npm run dev   # http://localhost:5173, proxies /api and /events to :8000
+```
+
+### 5. Submit a job
+```bash
 curl -X POST http://localhost:8000/jobs \
   -H "Content-Type: application/json" \
   -d '{"job_type": "send_email", "payload": {"to": "test@example.com"}}'
-Running the test suite
+```
+
+## Running the test suite
+```bash
 export DATABASE_URL="postgresql+asyncpg://postgres:<password>@localhost:5432/jobscheduler"
 export PYTHONPATH=.
 
 python3 scripts/smoke_test.py    # single-worker happy path, ~5s
 python3 scripts/stress_test.py   # 8 workers vs 500 jobs, ~30-60s
 python3 scripts/chaos_test.py    # kills a worker mid-job, ~60-90s
-Architecture notes worth understanding for interviews
-FOR UPDATE SKIP LOCKED (app/repositories/claim_query.sql) — the core concurrency-safety mechanism. Read the comments in that file; they walk through exactly why two workers can never claim the same job, at the Postgres row-locking level, with no application-side mutex needed.
-Lease/heartbeat (app/workers/worker.py) — a worker's job execution races against its own heartbeat task via asyncio.wait(..., FIRST_COMPLETED). If the heartbeat fails to renew (meaning another worker already reclaimed the job), the losing worker's execution is cancelled and it explicitly does NOT touch the job's final state — ownership has already moved on.
-Dead-lettering as a separate table, not a status flag — keeps the hot claim-query path fast by never having to filter out permanently failed rows.
-Job dependencies are a single NOT EXISTS subquery against a job_dependencies edge table — a minimal DAG scheduler, not a separate engine.
-Known limitations (worth naming yourself before an interviewer does)
-The dev-only /dev/kill-worker/{id} endpoint sends a raw OS signal by pid — fine for a single-machine demo, but explicitly not how you'd do this in a real deployment (you'd terminate via your orchestrator).
-Claiming uses 1s polling rather than LISTEN/NOTIFY — a deliberate simplification; LISTEN/NOTIFY is used for the dashboard instead, where sub-second feel actually matters.
-No auth on the API — out of scope for what this project is meant to demonstrate, but worth saying explicitly rather than leaving unstated.
-About
+```
 
-No description, website, or topics provided.
-Resources
-Readme
-Activity
-Stars
-0 stars
-Watchers
-0 watching
-Forks
-0 forks
-Releases
-No releases published
-Create a new release
-Packages
-No packages published
-Publish your first package
-Contributors
-1
- (1)
-@majorprojectaimlrns2026
-majorprojectaimlrns2026
-Languages
-Python
-72.6%
-JavaScript
-15.6%
-CSS
-6.4%
-PLpgSQL
-4.7%
-HTML
-0.7%
-Suggested workflows
-Based on your tech stack
+## Architecture
 
-SLSA Generic generator logo
-SLSA Generic generator
-Generate SLSA3 provenance for your existing release workflows
-By Open Source Security Foundation (OpenSSF)
-Datadog Synthetics logo
-Datadog Synthetics
-Run Datadog Synthetic tests within your GitHub Actions workflow
-By Datadog
-Pylint logo
-Pylint
-Lint a Python application with pylint.
-By GitHub Actions
-More workflows
-Footer
+- **Claiming** (`app/repositories/claim_query.sql`) — uses `FOR UPDATE SKIP LOCKED` so concurrent workers never claim the same row; contention is resolved at the database's row-locking level with no application-side mutex.
+- **Lease / heartbeat** (`app/workers/worker.py`) — job execution races against a heartbeat task via `asyncio.wait(..., FIRST_COMPLETED)`. If the heartbeat fails to renew (ownership was already reclaimed elsewhere), the losing worker cancels its execution and does not touch the job's final state.
+- **Dead-lettering** — a separate table rather than a status flag, keeping the primary claim query fast.
+- **Dependencies** — a `NOT EXISTS` subquery against a `job_dependencies` edge table; validated at submission, not yet enforced during execution ordering.
+
+## Tech stack
+
+Python, FastAPI, SQLAlchemy (async), PostgreSQL (`LISTEN`/`NOTIFY`, row-level locking), React, Server-Sent Events.
+
+## Known limitations
+
+- The `/dev/kill-worker/{id}` endpoint sends a raw OS signal by PID — suitable for local demonstration, not a production termination pattern.
+- Claiming uses interval-based polling rather than push notifications; `LISTEN`/`NOTIFY` is used specifically for the dashboard, where live updates matter most.
+- No authentication on the API — out of scope for this project.
+- Dependency-ordered execution is not yet implemented/verified.
+
+## License
+
+MIT
